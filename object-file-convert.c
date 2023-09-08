@@ -67,55 +67,74 @@ static int decode_tree_entry_raw(struct object_id *oid, const char **path,
 	return 0;
 }
 
-static int convert_tree_object(struct strbuf *out,
-			       const struct git_hash_algo *from,
-			       const struct git_hash_algo *to,
-			       const char *buffer, size_t size)
+static int convert_tree_object_step(struct object_file_convert_state *state)
 {
-	const char *p = buffer, *end = buffer + size;
+	const char *buf = state->buf, *p, *end = buf + state->buf_len;
+	const struct git_hash_algo *from = state->from;
+	const struct git_hash_algo *to = state->to;
+	struct strbuf *out = state->outbuf;
+
+	/* The current position */
+	p = buf + state->buf_pos;
 
 	while (p < end) {
-		struct object_id entry_oid, mapped_oid;
+		struct object_id entry_oid;
 		const char *path = NULL;
 		size_t pathlen;
 
 		if (decode_tree_entry_raw(&entry_oid, &path, &pathlen, from, p,
 					  end - p))
 			return error(_("failed to decode tree entry"));
-		if (repo_oid_to_algop(the_repository, &entry_oid, to, &mapped_oid))
-			return error(_("failed to map tree entry for %s"), oid_to_hex(&entry_oid));
+
+		if (!state->mapped_oid.algo) {
+			oidcpy(&state->oid, &entry_oid);
+			return 1;
+		}
+		else if (!oideq(&entry_oid, &state->oid))
+			return error(_("bad object_file_convert_state oid"));
+
 		strbuf_add(out, p, path - p);
 		strbuf_add(out, path, pathlen);
-		strbuf_add(out, mapped_oid.hash, to->rawsz);
+		strbuf_add(out, state->mapped_oid.hash, to->rawsz);
+		state->mapped_oid.algo = 0;
 		p = path + pathlen + from->rawsz;
+		state->buf_pos = p - buf;
 	}
 	return 0;
 }
 
-static int convert_commit_object(struct strbuf *out,
-				 const struct git_hash_algo *from,
-				 const struct git_hash_algo *to,
-				 const char *buffer, size_t size)
+static int convert_commit_object_step(struct object_file_convert_state *state)
 {
-	const char *tail = buffer;
-	const char *bufptr = buffer;
+	const struct git_hash_algo *from = state->from;
+	struct strbuf *out = state->outbuf;
+	const char *buf = state->buf;
+	const char *tail = buf + state->buf_len;
+	const char *bufptr = buf + state->buf_pos;
 	const int tree_entry_len = from->hexsz + 5;
 	const int parent_entry_len = from->hexsz + 7;
-	struct object_id oid, mapped_oid;
+	struct object_id oid;
 	const char *p;
 
-	tail += size;
-	if (tail <= bufptr + tree_entry_len + 1 || memcmp(bufptr, "tree ", 5) ||
-			bufptr[tree_entry_len] != '\n')
-		return error("bogus commit object");
-	if (parse_oid_hex_algop(bufptr + 5, &oid, &p, from) < 0)
-		return error("bad tree pointer");
+	if (state->buf_pos == 0) {
+		if (tail <= bufptr + tree_entry_len + 1 || memcmp(bufptr, "tree ", 5) ||
+		    bufptr[tree_entry_len] != '\n')
+			return error("bogus commit object");
 
-	if (repo_oid_to_algop(the_repository, &oid, to, &mapped_oid))
-		return error("unable to map tree %s in commit object",
-			     oid_to_hex(&oid));
-	strbuf_addf(out, "tree %s\n", oid_to_hex(&mapped_oid));
-	bufptr = p + 1;
+		if (parse_oid_hex_algop(bufptr + 5, &oid, &p, from) < 0)
+			return error("bad tree pointer");
+
+		if (!state->mapped_oid.algo) {
+			oidcpy(&state->oid, &oid);
+			return 1;
+		}
+		else if (!oideq(&oid, &state->oid))
+			return error(_("bad object_file_convert_state oid"));
+
+		strbuf_addf(out, "tree %s\n", oid_to_hex(&state->mapped_oid));
+		state->mapped_oid.algo = 0;
+		bufptr = p + 1;
+		state->buf_pos = bufptr - buf;
+	}
 
 	while (bufptr + parent_entry_len < tail && !memcmp(bufptr, "parent ", 7)) {
 		if (tail <= bufptr + parent_entry_len + 1 ||
@@ -123,26 +142,44 @@ static int convert_commit_object(struct strbuf *out,
 		    *p != '\n')
 			return error("bad parents in commit");
 
-		if (repo_oid_to_algop(the_repository, &oid, to, &mapped_oid))
-			return error("unable to map parent %s in commit object",
-				     oid_to_hex(&oid));
+		if (!state->mapped_oid.algo) {
+			oidcpy(&state->oid, &oid);
+			return 1;
+		}
+		else if (!oideq(&oid, &state->oid))
+			return error(_("bad object_file_convert_state oid"));
 
-		strbuf_addf(out, "parent %s\n", oid_to_hex(&mapped_oid));
+		strbuf_addf(out, "parent %s\n", oid_to_hex(&state->mapped_oid));
+		state->mapped_oid.algo = 0;
 		bufptr = p + 1;
+		state->buf_pos = bufptr - buf;
 	}
 	strbuf_add(out, bufptr, tail - bufptr);
 	return 0;
 }
 
-static int convert_tag_object(struct strbuf *out,
-			      const struct git_hash_algo *from,
-			      const struct git_hash_algo *to,
-			      const char *buffer, size_t size)
+static int convert_tag_object_step(struct object_file_convert_state *state)
 {
 	struct strbuf payload = STRBUF_INIT, temp = STRBUF_INIT, oursig = STRBUF_INIT, othersig = STRBUF_INIT;
-	size_t payload_size;
-	struct object_id oid, mapped_oid;
+	const struct git_hash_algo *from = state->from;
+	const struct git_hash_algo *to = state->to;
+	struct strbuf *out = state->outbuf;
+	const char *buffer = state->buf;
+	size_t payload_size, size = state->buf_len;;
+	struct object_id oid;
 	const char *p;
+	int ret = 0;
+
+	if (!state->mapped_oid.algo) {
+		if (strncmp(buffer, "object ", 7) ||
+		    buffer[from->hexsz + 7] != '\n')
+			return error("bogus tag object");
+		if (parse_oid_hex_algop(buffer + 7, &oid, &p, from) < 0)
+			return error("bad tag object ID");
+
+		oidcpy(&state->oid, &oid);
+		return 1;
+	}
 
 	/* Add some slop for longer signature header in the new algorithm. */
 	strbuf_grow(out, size + 7);
@@ -165,19 +202,90 @@ static int convert_tag_object(struct strbuf *out,
 	 * Our payload is now in payload and we may have up to two signatrures
 	 * in oursig and othersig.
 	 */
-	if (strncmp(payload.buf, "object ", 7) || payload.buf[from->hexsz + 7] != '\n')
-		return error("bogus tag object");
-	if (parse_oid_hex_algop(payload.buf + 7, &oid, &p, from) < 0)
-		return error("bad tag object ID");
-	if (repo_oid_to_algop(the_repository, &oid, to, &mapped_oid))
-		return error("unable to map tree %s in tag object",
-			     oid_to_hex(&oid));
-	strbuf_addf(out, "object %s\n", oid_to_hex(&mapped_oid));
+	if (strncmp(payload.buf, "object ", 7) || payload.buf[from->hexsz + 7] != '\n') {
+		ret = error("bogus tag object");
+		goto out;
+	}
+	if (parse_oid_hex_algop(payload.buf + 7, &oid, &p, from) < 0) {
+		ret = error("bad tag object ID");
+		goto out;
+	}
+	if (!oideq(&oid, &state->oid)) {
+		ret = error(_("bad object_file_convert_state oid"));
+		goto out;
+	}
+
+	strbuf_addf(out, "object %s\n", oid_to_hex(&state->mapped_oid));
 	strbuf_add(out, p, payload.len - (p - payload.buf));
 	strbuf_addbuf(out, &othersig);
 	if (oursig.len)
 		add_header_signature(out, &oursig, from);
-	return 0;
+out:
+	strbuf_release(&oursig);
+	strbuf_release(&othersig);
+	strbuf_release(&payload);
+	return ret;
+}
+
+void convert_object_file_begin(struct object_file_convert_state *state,
+			      struct strbuf *outbuf,
+			      const struct git_hash_algo *from,
+			      const struct git_hash_algo *to,
+			      const void *buf, size_t len,
+			      enum object_type type)
+{
+	memset(state, 0, sizeof(*state));
+	state->outbuf = outbuf;
+	state->from = from;
+	state->to = to;
+	state->buf = buf;
+	state->buf_len = len;
+	state->buf_pos = 0;
+	state->type = type;
+
+
+	/* Don't call this function when no conversion is necessary */
+	if ((from == to) || (type == OBJ_BLOB))
+		BUG("Attempting noop object file conversion");
+
+	switch (type) {
+	case OBJ_TREE:
+	case OBJ_COMMIT:
+	case OBJ_TAG:
+		break;
+	default:
+		/* Not implemented yet, so fail. */
+		BUG("Unknown object file type found in conversion");
+	}
+}
+
+int convert_object_file_step(struct object_file_convert_state *state)
+{
+	int ret;
+
+	switch(state->type) {
+	case OBJ_TREE:
+		ret = convert_tree_object_step(state);
+		break;
+	case OBJ_COMMIT:
+		ret = convert_commit_object_step(state);
+		break;
+	case OBJ_TAG:
+		ret = convert_tag_object_step(state);
+		break;
+	default:
+		ret = -1;
+		break;
+	}
+	return ret;
+}
+
+void convert_object_file_end(struct object_file_convert_state *state, int ret)
+{
+	if (ret != 0) {
+		strbuf_release(state->outbuf);
+	}
+	memset(state, 0, sizeof(*state));
 }
 
 int convert_object_file(struct strbuf *outbuf,
@@ -187,30 +295,26 @@ int convert_object_file(struct strbuf *outbuf,
 			enum object_type type,
 			int gentle)
 {
+	struct object_file_convert_state state;
 	int ret;
 
-	/* Don't call this function when no conversion is necessary */
-	if ((from == to) || (type == OBJ_BLOB))
-		die("Refusing noop object file conversion");
+	convert_object_file_begin(&state, outbuf, from, to, buf, len, type);
 
-	switch (type) {
-	case OBJ_TREE:
-		ret = convert_tree_object(outbuf, from, to, buf, len);
-		break;
-	case OBJ_COMMIT:
-		ret = convert_commit_object(outbuf, from, to, buf, len);
-		break;
-	case OBJ_TAG:
-		ret = convert_tag_object(outbuf, from, to, buf, len);
-		break;
-	default:
-		/* Not implemented yet, so fail. */
-		ret = -1;
-		break;
+	for (;;) {
+		ret = convert_object_file_step(&state);
+		if (ret != 1)
+			break;
+		ret = repo_oid_to_algop(the_repository, &state.oid, state.to,
+					&state.mapped_oid);
+		if (ret) {
+			error(_("failed to map %s entry for %s"),
+			      type_name(type), oid_to_hex(&state.oid));
+			break;
+		}
 	}
-	if (!ret)
-		return 0;
-	if (gentle)
+
+	convert_object_file_end(&state, ret);
+	if (!ret || gentle)
 		return ret;
 	die(_("Failed to convert object from %s to %s"),
 		from->name, to->name);

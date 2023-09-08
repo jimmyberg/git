@@ -10,6 +10,27 @@ struct strbuf;
 int repo_oid_to_algop(struct repository *repo, const struct object_id *src,
 		      const struct git_hash_algo *to, struct object_id *dest);
 
+struct object_file_convert_state {
+	struct strbuf *outbuf;
+	const struct git_hash_algo *from;
+	const struct git_hash_algo *to;
+	const void *buf;
+	size_t buf_len;
+	size_t buf_pos;
+	enum object_type type;
+	struct object_id oid;
+	struct object_id mapped_oid;
+};
+
+void convert_object_file_begin(struct object_file_convert_state *state,
+			       struct strbuf *outbuf,
+			       const struct git_hash_algo *from,
+			       const struct git_hash_algo *to,
+			       const void *buf, size_t len,
+			       enum object_type type);
+int convert_object_file_step(struct object_file_convert_state *state);
+void convert_object_file_end(struct object_file_convert_state *state, int ret);
+
 /*
  * Convert an object file from one hash algorithm to another algorithm.
  * Return -1 on failure, 0 on success.
