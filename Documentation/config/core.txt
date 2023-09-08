@@ -736,3 +736,9 @@ core.abbrev::
 	If set to "no", no abbreviation is made and the object names
 	are shown in their full length.
 	The minimum length is 4.
+
+core.compatMap::
+	Enables the use of a compat map to recored the hash in the
+	other object format.  This allows repositories in different
+	objects formats to interoperate.  It allows looking up old oids
+	in a repository that has been converted from sha1 to sha256.

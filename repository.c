@@ -104,6 +104,16 @@ void repo_set_hash_algo(struct repository *repo, int hash_algo)
 	repo->hash_algo = &hash_algos[hash_algo];
 }
 
+void repo_enable_compat_map(struct repository *repo, int enable_compat)
+{
+	const struct git_hash_algo *other_algo =
+		&hash_algos[(hash_algo_by_ptr(repo->hash_algo) == GIT_HASH_SHA1) ?
+			GIT_HASH_SHA256 :
+			GIT_HASH_SHA1];
+
+	repo->compat_hash_algo = enable_compat ? other_algo : NULL;
+}
+
 /*
  * Attempt to resolve and set the provided 'gitdir' for repository 'repo'.
  * Return 0 upon success and a non-zero value upon failure.
@@ -184,6 +194,7 @@ int repo_init(struct repository *repo,
 		goto error;
 
 	repo_set_hash_algo(repo, format.hash_algo);
+	repo_enable_compat_map(repo, format.use_compat_map);
 	repo->repository_format_worktree_config = format.worktree_config;
 
 	/* take ownership of format.partial_clone */
