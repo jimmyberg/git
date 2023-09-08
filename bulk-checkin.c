@@ -156,7 +156,8 @@ static int already_written(struct bulk_checkin_packfile *state, struct object_id
  * with a new pack.
  */
 static int stream_blob_to_pack(struct bulk_checkin_packfile *state,
-			       git_hash_ctx *ctx, off_t *already_hashed_to,
+			       git_hash_ctx *ctx, git_hash_ctx *compat_ctx,
+			       off_t *already_hashed_to,
 			       int fd, size_t size, const char *path,
 			       unsigned flags)
 {
@@ -167,6 +168,7 @@ static int stream_blob_to_pack(struct bulk_checkin_packfile *state,
 	int status = Z_OK;
 	int write_object = (flags & HASH_WRITE_OBJECT);
 	off_t offset = 0;
+	const struct git_hash_algo *compat = the_repository->compat_hash_algo;
 
 	git_deflate_init(&s, pack_compression_level);
 
@@ -188,8 +190,11 @@ static int stream_blob_to_pack(struct bulk_checkin_packfile *state,
 				size_t hsize = offset - *already_hashed_to;
 				if (rsize < hsize)
 					hsize = rsize;
-				if (hsize)
+				if (hsize) {
 					the_hash_algo->update_fn(ctx, ibuf, hsize);
+					if (compat)
+						compat->update_fn(compat_ctx, ibuf, hsize);
+				}
 				*already_hashed_to = offset;
 			}
 			s.next_in = ibuf;
@@ -253,11 +258,13 @@ static int deflate_blob_to_pack(struct bulk_checkin_packfile *state,
 				const char *path, unsigned flags)
 {
 	off_t seekback, already_hashed_to;
-	git_hash_ctx ctx;
+	git_hash_ctx ctx, compat_ctx;
 	unsigned char obuf[16384];
 	unsigned header_len;
 	struct hashfile_checkpoint checkpoint = {0};
 	struct pack_idx_entry *idx = NULL;
+	const struct git_hash_algo *compat = the_repository->compat_hash_algo;
+	struct object_id compat_oid = {};
 
 	seekback = lseek(fd, 0, SEEK_CUR);
 	if (seekback == (off_t) -1)
@@ -267,6 +274,10 @@ static int deflate_blob_to_pack(struct bulk_checkin_packfile *state,
 					  OBJ_BLOB, size);
 	the_hash_algo->init_fn(&ctx);
 	the_hash_algo->update_fn(&ctx, obuf, header_len);
+	if (compat) {
+		compat->init_fn(&compat_ctx);
+		compat->update_fn(&compat_ctx, obuf, header_len);
+	}
 
 	/* Note: idx is non-NULL when we are writing */
 	if ((flags & HASH_WRITE_OBJECT) != 0)
@@ -281,7 +292,8 @@ static int deflate_blob_to_pack(struct bulk_checkin_packfile *state,
 			idx->offset = state->offset;
 			crc32_begin(state->f);
 		}
-		if (!stream_blob_to_pack(state, &ctx, &already_hashed_to,
+		if (!stream_blob_to_pack(state, &ctx, &compat_ctx,
+					 &already_hashed_to,
 					 fd, size, path, flags))
 			break;
 		/*
@@ -298,6 +310,8 @@ static int deflate_blob_to_pack(struct bulk_checkin_packfile *state,
 			return error("cannot seek back");
 	}
 	the_hash_algo->final_oid_fn(result_oid, &ctx);
+	if (compat)
+		compat->final_oid_fn(&compat_oid, &compat_ctx);
 	if (!idx)
 		return 0;
 
@@ -308,6 +322,8 @@ static int deflate_blob_to_pack(struct bulk_checkin_packfile *state,
 		free(idx);
 	} else {
 		oidcpy(&idx->oid, result_oid);
+		if (compat)
+			oidcpy(&idx->compat_oid, &compat_oid);
 		ALLOC_GROW(state->written,
 			   state->nr_written + 1,
 			   state->alloc_written);
