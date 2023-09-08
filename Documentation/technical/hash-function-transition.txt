@@ -209,6 +209,46 @@ format described in linkgit:gitformat-pack[5], just like
 today. The content that is compressed and stored uses SHA-256 content
 instead of SHA-1 content.
 
+Per Pack Mapping Table
+~~~~~~~~~~~~~~~~~~~~~~
+A pack compat map file (.compat) files have the following format:
+
+HEADER:
+	4-byte signature:
+	    The signature is: {'C', 'M', 'A', 'P'}
+	1-byte version number:
+	    Git only writes or recognizes version 1.
+	1-byte First Object Id Version
+	    We infer the length of object IDs (OIDs) from this value:
+		1 => SHA-1
+		2 => SHA-256
+	1-byte Second Object Id Version
+	    We infer the length of object IDs (OIDs) from this value:
+		1 => SHA-1
+		2 => SHA-256
+	1-byte reserved (must be zero)
+	4-byte number of objects names contained in this mapping
+	1-byte length in bytes of shorted object names for the first object id.
+	       This is the shortest possible length needed to make the
+	       first object names unambigious.
+	1-byte reserved (must be zero)
+	1-byte length in bytes of shorted object names for the second object id.
+	       This is the shortest possible length needed to make the
+	       second object names unambigious.
+	1-byte reserved (must be zero)
+
+OBJECT NAME TABLES:
+	[Object name raw length + 4]*Number of object names
+	   This table is sorted by object name
+	   Each entry in the table is formated as:
+		[20 or 32 byte] Object name
+		4-byte index into the other object name table
+
+TRAILER:
+	checksum of the corresponding packfile, and
+
+	checksum of all of the above.
+
 Pack index
 ~~~~~~~~~~
 Pack index (.idx) files use a new v3 format that supports multiple
