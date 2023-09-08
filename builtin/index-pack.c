@@ -126,6 +126,9 @@ static int ref_deltas_alloc;
 static int nr_resolved_deltas;
 static int nr_threads;
 
+static int32_t *oid_index;
+static uint32_t oid_index_size;
+
 static int from_stdin;
 static int strict;
 static int do_fsck_object;
@@ -181,6 +184,62 @@ static inline void unlock_mutex(pthread_mutex_t *mutex)
 {
 	if (threads_active)
 		pthread_mutex_unlock(mutex);
+}
+
+static uint32_t locate_oid_index(const struct object_id *oid, int *found)
+{
+	uint32_t i, mask = (oid_index_size - 1);
+
+	i = oidhash(oid) & mask;
+
+	while (oid_index[i] > 0) {
+		uint32_t pos = oid_index[i] - 1;
+
+		if (oideq(oid, &objects[pos].idx.oid)) {
+			*found = 1;
+			return i;
+		}
+
+		i = (i + 1) & mask;
+	}
+
+	*found = 0;
+	return i;
+}
+
+static void place_in_oid_index(struct object_entry *obj)
+{
+	int found;
+	uint32_t pos = locate_oid_index(&obj->idx.oid, &found);
+
+	/* Ignore duplicates */
+	if (found)
+		return;
+
+	oid_index[pos] = (obj - objects) + 1;
+}
+
+static struct object_entry *find_in_oid_index(struct object_id *oid)
+{
+	uint32_t i;
+	int found;
+
+	i = locate_oid_index(oid, &found);
+	if (!found)
+		return NULL;
+
+	return &objects[oid_index[i] - 1];
+}
+
+static inline uint32_t closest_pow2(uint32_t v)
+{
+	v = v - 1;
+	v |= v >> 1;
+	v |= v >> 2;
+	v |= v >> 4;
+	v |= v >> 8;
+	v |= v >> 16;
+	return v + 1;
 }
 
 /*
@@ -987,6 +1046,7 @@ static struct base_data *resolve_delta(struct object_entry *delta_obj,
 		bad_object(delta_obj->idx.offset, _("failed to apply delta"));
 	hash_object_file(the_hash_algo, result_data, result_size,
 			 delta_obj->real_type, &delta_obj->idx.oid);
+	place_in_oid_index(delta_obj);
 	sha1_object(result_data, NULL, result_size, delta_obj->real_type,
 		    &delta_obj->idx.oid);
 
@@ -1188,12 +1248,16 @@ static void parse_pack_objects(unsigned char *hash)
 			ref_deltas[nr_ref_deltas].obj_no = i;
 			nr_ref_deltas++;
 		} else if (!data) {
+			place_in_oid_index(obj);
+
 			/* large blobs, check later */
 			obj->real_type = OBJ_BAD;
 			nr_delays++;
-		} else
+		} else {
+			place_in_oid_index(obj);
 			sha1_object(data, NULL, obj->size, obj->type,
 				    &obj->idx.oid);
+		}
 		free(data);
 		display_progress(progress, i+1);
 	}
@@ -1918,6 +1982,8 @@ int cmd_index_pack(int argc, const char **argv, const char *prefix)
 	if (show_stat)
 		CALLOC_ARRAY(obj_stat, st_add(nr_objects, 1));
 	CALLOC_ARRAY(ofs_deltas, nr_objects);
+	oid_index_size = closest_pow2(nr_objects * 3);
+	CALLOC_ARRAY(oid_index, oid_index_size);
 	parse_pack_objects(pack_hash);
 	if (report_end_of_input)
 		write_in_full(2, "\0", 1);
