@@ -1070,7 +1070,10 @@ static int store_object(
 			else if (pobj)
 				break;
 			else if (repo_oid_to_algop(repo, &state.oid, compat,
-						   &state.mapped_oid))
+						   &state.mapped_oid) &&
+				 repo_submodule_oid_to_algop(repo, &state.oid,
+							     compat,
+							     &state.mapped_oid))
 				break;
 		}
 		convert_object_file_end(&state, ret);

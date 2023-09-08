@@ -2093,7 +2093,9 @@ static void compute_compat_oid(struct object_entry *obj)
 		else if (pobj)
 			cco = cco_push(cco, pobj);
 		else if (repo_oid_to_algop(repo, &cco->state.oid, compat,
-					   &cco->state.mapped_oid))
+					   &cco->state.mapped_oid) &&
+			 repo_submodule_oid_to_algop(repo, &cco->state.oid, compat,
+						     &cco->state.mapped_oid))
 			die(_("When converting %s no mapping for oid %s to %s\n"),
 			    oid_to_hex(&cco->obj->idx.oid),
 			    oid_to_hex(&cco->state.oid),

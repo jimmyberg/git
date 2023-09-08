@@ -11,6 +11,45 @@
 #include "gpg-interface.h"
 #include "pack-compat-map.h"
 #include "object-file-convert.h"
+#include "read-cache.h"
+#include "submodule-config.h"
+
+int repo_submodule_oid_to_algop(struct repository *repo,
+				const struct object_id *src,
+				const struct git_hash_algo *to,
+				struct object_id *dest)
+{
+	int i;
+
+	if (repo_read_index(repo) < 0)
+		die(_("index file corrupt"));
+
+	for (i = 0; i < repo->index->cache_nr; i++) {
+		const struct cache_entry *ce = repo->index->cache[i];
+		struct repository subrepo = {};
+		int ret;
+
+		if (!S_ISGITLINK(ce->ce_mode))
+			continue;
+
+		while (i + 1 < repo->index->cache_nr &&
+		       !strcmp(ce->name, repo->index->cache[i + 1]->name))
+			/*
+			 * Skip entries with the same name in different stages
+			 * to make sure an entry is returned only once.
+			 */
+			i++;
+
+		if (repo_submodule_init(&subrepo, repo, ce->name, null_oid()))
+			continue;
+
+		ret = repo_oid_to_algop(&subrepo, src, to, dest);
+		repo_clear(&subrepo);
+		if (ret == 0)
+			return 0;
+	}
+	return -1;
+}
 
 int repo_oid_to_algop(struct repository *repo, const struct object_id *src,
 		      const struct git_hash_algo *to, struct object_id *dest)
@@ -34,6 +73,7 @@ int repo_oid_to_algop(struct repository *repo, const struct object_id *src,
 		 */
 		if (!repo_packed_oid_to_algop(repo, src, to, dest))
 			return 0;
+
 		/*
 		 * We may have loaded the object map at repo initialization but
 		 * another process (perhaps upstream of a pipe from us) may have
@@ -306,6 +346,11 @@ int convert_object_file(struct strbuf *outbuf,
 			break;
 		ret = repo_oid_to_algop(the_repository, &state.oid, state.to,
 					&state.mapped_oid);
+		if (ret)
+			ret = repo_submodule_oid_to_algop(the_repository,
+							  &state.oid,
+							  state.to,
+							  &state.mapped_oid);
 		if (ret) {
 			error(_("failed to map %s entry for %s"),
 			      type_name(type), oid_to_hex(&state.oid));

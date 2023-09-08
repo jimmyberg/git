@@ -10,6 +10,11 @@ struct strbuf;
 int repo_oid_to_algop(struct repository *repo, const struct object_id *src,
 		      const struct git_hash_algo *to, struct object_id *dest);
 
+int repo_submodule_oid_to_algop(struct repository *repo,
+				const struct object_id *src,
+				const struct git_hash_algo *to,
+				struct object_id *dest);
+
 struct object_file_convert_state {
 	struct strbuf *outbuf;
 	const struct git_hash_algo *from;
