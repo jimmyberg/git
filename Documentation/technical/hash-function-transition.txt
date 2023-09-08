@@ -148,14 +148,14 @@ Detailed Design
 Repository format extension
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 A SHA-256 repository uses repository format version `1` (see
-Documentation/technical/repository-version.txt) with extensions
-`objectFormat` and `compatObjectFormat`:
+Documentation/technical/repository-version.txt) with the extension
+`objectFormat`, and an optional core.compatMap configuration.
 
 	[core]
 		repositoryFormatVersion = 1
+		compatMap = on
 	[extensions]
 		objectFormat = sha256
-		compatObjectFormat = sha1
 
 The combination of setting `core.repositoryFormatVersion=1` and
 populating `extensions.*` ensures that all versions of Git later than
@@ -682,7 +682,7 @@ Some initial steps can be implemented independently of one another:
 - adding support for the PSRC field and safer object pruning
 
 The first user-visible change is the introduction of the objectFormat
-extension (without compatObjectFormat). This requires:
+extension. This requires:
 
 - teaching fsck about this mode of operation
 - using the hash function API (vtable) when computing object names
@@ -690,7 +690,7 @@ extension (without compatObjectFormat). This requires:
 - rejecting attempts to fetch from or push to an incompatible
   repository
 
-Next comes introduction of compatObjectFormat:
+Next comes introduction of compatMap:
 
 - implementing the loose-object-idx
 - translating object names between object formats
@@ -724,9 +724,9 @@ Over time projects would encourage their users to adopt the "early
 transition" and then "late transition" modes to take advantage of the
 new, more futureproof SHA-256 object names.
 
-When objectFormat and compatObjectFormat are both set, commands
-generating signatures would generate both SHA-1 and SHA-256 signatures
-by default to support both new and old users.
+When objectFormat and compatMap are both set, commands generating
+signatures would generate both SHA-1 and SHA-256 signatures by default
+to support both new and old users.
 
 In projects using SHA-256 heavily, users could be encouraged to adopt
 the "post-transition" mode to avoid accidentally making implicit use
