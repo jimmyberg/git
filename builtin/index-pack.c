@@ -2015,54 +2015,90 @@ static void *get_object_data(struct object_entry *obj, size_t *result_size)
 	return NULL; /* The code never reaches here */
 }
 
-static void compute_compat_oid(struct object_entry *obj)
+struct cco {
+	struct cco *prev;
+	struct object_entry *obj;
+	struct object_file_convert_state state;
+	struct strbuf out;
+	size_t data_size;
+	void *data;
+};
+
+static struct cco *cco_push(struct cco *prev, struct object_entry *obj)
 {
 	struct repository *repo = the_repository;
 	const struct git_hash_algo *algo = repo->hash_algo;
 	const struct git_hash_algo *compat = repo->compat_hash_algo;
-	struct object_file_convert_state state;
-	struct strbuf out = STRBUF_INIT;
-	size_t data_size;
-	void *data;
-	int ret;
-
-	if (obj->idx.compat_oid.algo)
-		return;
+	struct cco *cco;
 
 	if (obj->real_type == OBJ_BLOB)
-		die("Blob object not converted");
+		BUG("Blob object not converted");
 
-	data = get_object_data(obj, &data_size);
+	cco = xmallocz(sizeof(*cco));
+	cco->prev = prev;
+	cco->obj = obj;
+	strbuf_init(&cco->out, 0);
 
-	convert_object_file_begin(&state, &out, algo, compat,
-				  data, data_size, obj->real_type);
+	cco->data = get_object_data(obj, &cco->data_size);
 
-	for (;;) {
-		struct object_entry *pobj;
-		ret = convert_object_file_step(&state);
-		if (ret != 1)
-			break;
-		/* Does it name an object in the pack? */
-		pobj = find_in_oid_index(&state.oid);
-		if (pobj) {
-			compute_compat_oid(pobj);
-			oidcpy(&state.mapped_oid, &pobj->idx.compat_oid);
-		} else if (repo_oid_to_algop(repo, &state.oid, compat,
-					     &state.mapped_oid))
-			die(_("No mapping for oid %s to %s\n"),
-			    oid_to_hex(&state.oid), compat->name);
-	}
-	convert_object_file_end(&state, ret);
+	convert_object_file_begin(&cco->state, &cco->out, algo, compat,
+				  cco->data, cco->data_size, obj->real_type);
+	return cco;
+}
+
+static struct cco *cco_pop(struct cco *cco, int ret)
+{
+	struct repository *repo = the_repository;
+	const struct git_hash_algo *compat = repo->compat_hash_algo;
+	struct cco *prev = cco->prev;
+
+	convert_object_file_end(&cco->state, ret);
 	if (ret != 0)
-		die(_("Bad object %s\n"), oid_to_hex(&obj->idx.oid));
-	hash_object_file(compat, out.buf, out.len, obj->real_type,
-			 &obj->idx.compat_oid);
-	strbuf_release(&out);
-
-	free(data);
+		die(_("Bad object %s\n"), oid_to_hex(&cco->obj->idx.oid));
+	hash_object_file(compat, cco->out.buf, cco->out.len,
+			 cco->obj->real_type, &cco->obj->idx.compat_oid);
+	strbuf_release(&cco->out);
+	if (prev)
+		oidcpy(&prev->state.mapped_oid, &cco->obj->idx.compat_oid);
 
 	nr_resolved_mappings++;
 	display_progress(progress, nr_resolved_mappings);
+
+	free(cco->data);
+	free(cco);
+
+	return prev;
+}
+
+static void compute_compat_oid(struct object_entry *obj)
+{
+	struct repository *repo = the_repository;
+	const struct git_hash_algo *compat = repo->compat_hash_algo;
+	struct cco *cco;
+
+	cco = cco_push(NULL, obj);
+	for (;cco;) {
+		struct object_entry *pobj;
+
+		int ret = convert_object_file_step(&cco->state);
+		if (ret != 1) {
+			cco = cco_pop(cco, ret);
+			continue;
+		}
+
+		/* Does it name an object in the pack? */
+		pobj = find_in_oid_index(&cco->state.oid);
+		if (pobj && pobj->idx.compat_oid.algo)
+			oidcpy(&cco->state.mapped_oid, &pobj->idx.compat_oid);
+		else if (pobj)
+			cco = cco_push(cco, pobj);
+		else if (repo_oid_to_algop(repo, &cco->state.oid, compat,
+					   &cco->state.mapped_oid))
+			die(_("When converting %s no mapping for oid %s to %s\n"),
+			    oid_to_hex(&cco->obj->idx.oid),
+			    oid_to_hex(&cco->state.oid),
+			    compat->name);
+	}
 }
 
 static void compute_compat_oids(void)
