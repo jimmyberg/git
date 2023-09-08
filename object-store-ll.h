@@ -135,6 +135,12 @@ struct packed_git {
 	 */
 	const uint32_t *mtimes_map;
 	size_t mtimes_size;
+
+	const void *compat_mapping;
+	size_t compat_mapping_size;
+	const uint8_t *hash_map;
+	const uint8_t *compat_hash_map;
+
 	/* something like ".git/objects/pack/xxxxx.pack" */
 	char pack_name[FLEX_ARRAY]; /* more */
 };

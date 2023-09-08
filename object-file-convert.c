@@ -9,6 +9,7 @@
 #include "loose.h"
 #include "commit.h"
 #include "gpg-interface.h"
+#include "pack-compat-map.h"
 #include "object-file-convert.h"
 
 int repo_oid_to_algop(struct repository *repo, const struct object_id *src,
@@ -27,6 +28,12 @@ int repo_oid_to_algop(struct repository *repo, const struct object_id *src,
 		return 0;
 	}
 	if (repo_loose_object_map_oid(repo, dest, to, src)) {
+		/*
+		 * It's not in the loose object map, so let's see if it's in a
+		 * pack.
+		 */
+		if (!repo_packed_oid_to_algop(repo, src, to, dest))
+			return 0;
 		/*
 		 * We may have loaded the object map at repo initialization but
 		 * another process (perhaps upstream of a pipe from us) may have

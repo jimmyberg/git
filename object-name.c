@@ -26,6 +26,7 @@
 #include "commit-reach.h"
 #include "date.h"
 #include "object-file-convert.h"
+#include "pack-compat-map.h"
 
 static int get_oid_oneline(struct repository *r, const char *, struct object_id *, struct commit_list *);
 
@@ -208,6 +209,19 @@ static void find_short_packed_object(struct disambiguate_state *ds)
 	for (p = get_packed_git(ds->repo); p && !ds->ambiguous;
 	     p = p->next)
 		unique_in_pack(p, ds);
+}
+
+static void find_short_packed_compat_object(struct disambiguate_state *ds)
+{
+	struct packed_git *p;
+
+	/* Skip, unless compatibility oids are wanted */
+	if (!ds->algo && (&hash_algos[ds->algo] != ds->repo->compat_hash_algo))
+		return;
+
+	for (p = get_packed_git(ds->repo); p && !ds->ambiguous; p = p->next)
+		pack_compat_map_each(ds->repo, p, ds->bin_pfx.hash, ds->len,
+				     match_prefix, ds);
 }
 
 static int finish_object_disambiguation(struct disambiguate_state *ds,
@@ -581,6 +595,7 @@ static enum get_oid_result get_short_oid(struct repository *r,
 
 	find_short_object_filename(&ds);
 	find_short_packed_object(&ds);
+	find_short_packed_compat_object(&ds);
 	status = finish_object_disambiguation(&ds, oid);
 
 	/*
@@ -592,6 +607,7 @@ static enum get_oid_result get_short_oid(struct repository *r,
 		reprepare_packed_git(r);
 		find_short_object_filename(&ds);
 		find_short_packed_object(&ds);
+		find_short_packed_compat_object(&ds);
 		status = finish_object_disambiguation(&ds, oid);
 	}
 
@@ -659,6 +675,7 @@ int repo_for_each_abbrev(struct repository *r, const char *prefix,
 	ds.cb_data = &collect;
 	find_short_object_filename(&ds);
 	find_short_packed_object(&ds);
+	find_short_packed_compat_object(&ds);
 
 	ret = oid_array_for_each_unique(&collect, fn, cb_data);
 	oid_array_clear(&collect);
@@ -871,6 +888,7 @@ int repo_find_unique_abbrev_r(struct repository *r, char *hex,
 	ds.cb_data = (void *)&mad;
 
 	find_short_object_filename(&ds);
+	find_short_packed_compat_object(&ds);
 	(void)finish_object_disambiguation(&ds, &oid_ret);
 
 	hex[mad.cur_len] = 0;

@@ -349,6 +349,17 @@ static void close_pack_mtimes(struct packed_git *p)
 	p->mtimes_map = NULL;
 }
 
+static void close_pack_compat_map(struct packed_git *p)
+{
+	if (!p->compat_mapping)
+		return;
+
+	munmap((void *)p->compat_mapping, p->compat_mapping_size);
+	p->compat_mapping = NULL;
+	p->hash_map = NULL;
+	p->compat_hash_map = NULL;
+}
+
 void close_pack(struct packed_git *p)
 {
 	close_pack_windows(p);
@@ -356,6 +367,7 @@ void close_pack(struct packed_git *p)
 	close_pack_index(p);
 	close_pack_revindex(p);
 	close_pack_mtimes(p);
+	close_pack_compat_map(p);
 	oidset_clear(&p->bad_objects);
 }
 

@@ -606,6 +606,7 @@ static struct cmd_struct commands[] = {
 	{ "show", cmd_show, RUN_SETUP },
 	{ "show-branch", cmd_show_branch, RUN_SETUP },
 	{ "show-index", cmd_show_index, RUN_SETUP_GENTLY },
+	{ "show-compat-map", cmd_show_compat_map, RUN_SETUP_GENTLY },
 	{ "show-ref", cmd_show_ref, RUN_SETUP },
 	{ "sparse-checkout", cmd_sparse_checkout, RUN_SETUP },
 	{ "stage", cmd_add, RUN_SETUP | NEED_WORK_TREE },

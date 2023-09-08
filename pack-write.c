@@ -12,6 +12,7 @@
 #include "pack-revindex.h"
 #include "path.h"
 #include "strbuf.h"
+#include "object-file-convert.h"
 
 void reset_pack_idx_option(struct pack_idx_option *opts)
 {
@@ -345,6 +346,157 @@ static char *write_mtimes_file(struct packing_data *to_pack,
 	return mtimes_name;
 }
 
+struct map_entry {
+	const struct pack_idx_entry *idx;
+	uint32_t oid_index;
+	uint32_t compat_oid_index;
+};
+
+static int map_oid_cmp(const void *_a, const void *_b)
+{
+	struct map_entry *a = *(struct map_entry **)_a;
+	struct map_entry *b = *(struct map_entry **)_b;
+	return oidcmp(&a->idx->oid, &b->idx->oid);
+}
+
+static int map_compat_oid_cmp(const void *_a, const void *_b)
+{
+	struct map_entry *a = *(struct map_entry **)_a;
+	struct map_entry *b = *(struct map_entry **)_b;
+	return oidcmp(&a->idx->compat_oid, &b->idx->compat_oid);
+}
+
+struct pack_compat_map_header {
+	uint8_t sig[4];
+	uint8_t version;
+	uint8_t first_oid_version;
+	uint8_t second_oid_version;
+	uint8_t mbz1;
+	uint32_t nr_objects;
+	uint8_t first_abbrev_len;
+	uint8_t mbz2;
+	uint8_t second_abbrev_len;
+	uint8_t mbz3;
+};
+
+static inline unsigned last_matching_offset(const struct object_id *a,
+					    const struct object_id *b,
+					    const struct git_hash_algo *algop)
+{
+	unsigned i;
+	for (i = 0; i < algop->rawsz; i++)
+		if (a->hash[i] != b->hash[i])
+			return i;
+	/* We should never hit this case. */
+	return i;
+}
+
+/*
+ * The *hash contains the pack content hash.
+ * The objects array is passed in sorted.
+ */
+const char *write_compat_map_file(const char *compat_map_name,
+				  struct pack_idx_entry **objects,
+				  int nr_objects, const unsigned char *hash)
+{
+	struct repository *repo = the_repository;
+	const struct git_hash_algo *algo = repo->hash_algo;
+	const struct git_hash_algo *compat = repo->compat_hash_algo;
+	unsigned short_name_len, compat_short_name_len;
+	struct hashfile *f;
+	struct map_entry *map_entries, **map;
+	struct pack_compat_map_header hdr;
+	unsigned i;
+	int fd;
+
+	if (!compat || !nr_objects)
+		return NULL;
+
+	ALLOC_ARRAY(map_entries, nr_objects);
+	ALLOC_ARRAY(map, nr_objects);
+	short_name_len = 1;
+	for (i = 0; i < nr_objects; ++i) {
+		unsigned offset;
+
+		map[i] = &map_entries[i];
+		map_entries[i].idx = objects[i];
+		if (!objects[i]->compat_oid.algo)
+			BUG("No mapping from %s to %s\n",
+			    oid_to_hex(&objects[i]->oid),
+			    compat->name);
+
+		map_entries[i].oid_index = i;
+		map_entries[i].compat_oid_index = 0;
+		if (i == 0)
+			continue;
+
+		offset = last_matching_offset(&map_entries[i].idx->oid,
+					      &map_entries[i - 1].idx->oid,
+					      algo);
+		if (offset > short_name_len)
+			short_name_len = offset;
+	}
+	QSORT(map, nr_objects, map_compat_oid_cmp);
+	compat_short_name_len = 1;
+	for (i = 0; i < nr_objects; ++i) {
+		unsigned offset;
+
+		map[i]->compat_oid_index = i;
+
+		if (i == 0)
+			continue;
+
+		offset = last_matching_offset(&map[i]->idx->compat_oid,
+					      &map[i - 1]->idx->compat_oid,
+					      compat);
+		if (offset > compat_short_name_len)
+			compat_short_name_len = offset;
+	}
+
+	if (compat_map_name) {
+		/* Verify an existing compat map file */
+		f = hashfd_check(compat_map_name);
+	} else {
+		struct strbuf tmp_file = STRBUF_INIT;
+		fd = odb_mkstemp(&tmp_file, "pack/tmp_compat_map_XXXXXX");
+		compat_map_name = strbuf_detach(&tmp_file, NULL);
+		f = hashfd(fd, compat_map_name);
+	}
+
+	hdr.sig[0] = 'C';
+	hdr.sig[1] = 'M';
+	hdr.sig[2] = 'A';
+	hdr.sig[3] = 'P';
+	hdr.version = 1;
+	hdr.first_oid_version = oid_version(algo);
+	hdr.second_oid_version = oid_version(compat);
+	hdr.mbz1 = 0;
+	hdr.nr_objects = htonl(nr_objects);
+	hdr.first_abbrev_len = short_name_len;
+	hdr.mbz2 = 0;
+	hdr.second_abbrev_len = compat_short_name_len;
+	hdr.mbz3 = 0;
+	hashwrite(f, &hdr, sizeof(hdr));
+
+	QSORT(map, nr_objects, map_oid_cmp);
+	for (i = 0; i < nr_objects; i++) {
+		hashwrite(f, map[i]->idx->oid.hash, algo->rawsz);
+		hashwrite_be32(f, map[i]->compat_oid_index);
+	}
+	QSORT(map, nr_objects, map_compat_oid_cmp);
+	for (i = 0; i < nr_objects; i++) {
+		hashwrite(f, map[i]->idx->compat_oid.hash, compat->rawsz);
+		hashwrite_be32(f, map[i]->oid_index);
+	}
+
+	hashwrite(f, hash, algo->rawsz);
+	finalize_hashfile(f, NULL, FSYNC_COMPONENT_PACK_METADATA,
+			  CSUM_HASH_IN_STREAM | CSUM_CLOSE | CSUM_FSYNC);
+	free(map);
+	free(map_entries);
+	return compat_map_name;
+}
+
 off_t write_pack_header(struct hashfile *f, uint32_t nr_entries)
 {
 	struct pack_header hdr;
@@ -548,6 +700,7 @@ void stage_tmp_packfiles(struct strbuf *name_buffer,
 {
 	const char *rev_tmp_name = NULL;
 	char *mtimes_tmp_name = NULL;
+	const char *compat_map_tmp_name = NULL;
 
 	if (adjust_shared_perm(pack_tmp_name))
 		die_errno("unable to make temporary pack file readable");
@@ -566,11 +719,16 @@ void stage_tmp_packfiles(struct strbuf *name_buffer,
 						    hash);
 	}
 
+	compat_map_tmp_name = write_compat_map_file(NULL, written_list,
+						    nr_written, hash);
+
 	rename_tmp_packfile(name_buffer, pack_tmp_name, "pack");
 	if (rev_tmp_name)
 		rename_tmp_packfile(name_buffer, rev_tmp_name, "rev");
 	if (mtimes_tmp_name)
 		rename_tmp_packfile(name_buffer, mtimes_tmp_name, "mtimes");
+	if (compat_map_tmp_name)
+		rename_tmp_packfile(name_buffer, compat_map_tmp_name, "compat");
 
 	free((char *)rev_tmp_name);
 	free(mtimes_tmp_name);
