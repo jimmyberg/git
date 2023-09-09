@@ -262,7 +262,7 @@ struct option {
 	.type = OPTION_SET_INT, \
 	.short_name = (s), \
 	.long_name = (l), \
-	.value = (v), \
+	.value_int = (v), \
 	.help = (h), \
 	.flags = PARSE_OPT_CMDMODE|PARSE_OPT_NOARG|PARSE_OPT_NONEG | (f), \
 	.defval = (i), \
