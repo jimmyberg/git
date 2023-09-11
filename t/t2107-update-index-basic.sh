@@ -111,4 +111,20 @@ test_expect_success '--chmod=+x and chmod=-x in the same argument list' '
 	test_cmp expect actual
 '
 
+test_expect_success '--index-version' '
+	git commit --allow-empty -m snap &&
+	git reset --hard &&
+
+	git update-index --index-version 2 >actual &&
+	test_must_be_empty actual &&
+
+	git update-index --show-index-version >actual &&
+	echo 2 >expect &&
+	test_cmp expect actual &&
+
+	git update-index --index-version 4 --verbose >actual &&
+	echo "index-version: was 2, set to 4" >expect &&
+	test_cmp expect actual
+'
+
 test_done
