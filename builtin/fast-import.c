@@ -784,7 +784,7 @@ struct pack_index_names {
 
 static struct pack_index_names create_index(void)
 {
-	struct pack_index_names tmp = {};
+	struct pack_index_names tmp = { 0 };
 	struct pack_idx_entry **idx, **c, **last;
 	struct object_entry *e;
 	struct object_entry_pool *o;

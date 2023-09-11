@@ -264,7 +264,7 @@ static int deflate_blob_to_pack(struct bulk_checkin_packfile *state,
 	struct hashfile_checkpoint checkpoint = {0};
 	struct pack_idx_entry *idx = NULL;
 	const struct git_hash_algo *compat = the_repository->compat_hash_algo;
-	struct object_id compat_oid = {};
+	struct object_id compat_oid = { 0 };
 
 	seekback = lseek(fd, 0, SEEK_CUR);
 	if (seekback == (off_t) -1)

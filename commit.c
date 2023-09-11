@@ -1654,7 +1654,7 @@ int commit_tree_extended(const char *msg, size_t msg_len,
 	struct strbuf buffer, compat_buffer;
 	struct strbuf sig = STRBUF_INIT, compat_sig = STRBUF_INIT;
 	struct object_id *parent_buf = NULL;
-	struct object_id compat_oid = {};
+	struct object_id compat_oid = { 0 };
 	size_t i, nparents;
 
 	/* Not having i18n.commitencoding is the same as having utf-8 */

@@ -26,7 +26,7 @@ int repo_submodule_oid_to_algop(struct repository *repo,
 
 	for (i = 0; i < repo->index->cache_nr; i++) {
 		const struct cache_entry *ce = repo->index->cache[i];
-		struct repository subrepo = {};
+		struct repository subrepo = { 0 };
 		int ret;
 
 		if (!S_ISGITLINK(ce->ce_mode))
@@ -205,7 +205,7 @@ static int convert_tag_object_step(struct object_file_convert_state *state)
 	const struct git_hash_algo *to = state->to;
 	struct strbuf *out = state->outbuf;
 	const char *buffer = state->buf;
-	size_t payload_size, size = state->buf_len;;
+	size_t payload_size, size = state->buf_len;
 	struct object_id oid;
 	const char *p;
 	int ret = 0;
