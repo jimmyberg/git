@@ -241,7 +241,8 @@ static int check_object(struct object *obj, enum object_type type,
 	obj_buf = lookup_object_buffer(obj);
 	if (!obj_buf)
 		die("Whoops! Cannot find object '%s'", oid_to_hex(&obj->oid));
-	if (fsck_object(obj, obj_buf->buffer, obj_buf->size, &fsck_options))
+	if (strict &&
+	    fsck_object(obj, obj_buf->buffer, obj_buf->size, &fsck_options))
 		die("fsck error in packed object");
 	fsck_options.walk = check_object;
 	if (fsck_walk(obj, NULL, &fsck_options))
@@ -270,7 +271,7 @@ static void added_object(unsigned nr, enum object_type type,
 static void write_object(unsigned nr, enum object_type type,
 			 void *buf, unsigned long size)
 {
-	if (!strict) {
+	if (!strict && !the_repository->compat_hash_algo) {
 		if (write_object_file(buf, size, type,
 				      &obj_list[nr].oid) < 0)
 			die("failed to write object");
@@ -409,7 +410,7 @@ static void stream_blob(unsigned long size, unsigned nr)
 		die(_("inflate returned (%d)"), data.status);
 	git_inflate_end(&zstream);
 
-	if (strict) {
+	if (strict || the_repository->compat_hash_algo) {
 		struct blob *blob = lookup_blob(the_repository, &info->oid);
 
 		if (!blob)
@@ -673,11 +674,11 @@ int cmd_unpack_objects(int argc, const char **argv, const char *prefix UNUSED)
 	the_hash_algo->init_fn(&tmp_ctx);
 	the_hash_algo->clone_fn(&tmp_ctx, &ctx);
 	the_hash_algo->final_oid_fn(&oid, &tmp_ctx);
-	if (strict) {
+	the_hash_algo->final_oid_fn(&oid, &tmp_ctx);
+	if (strict || the_repository->compat_hash_algo)
 		write_rest();
-		if (fsck_finish(&fsck_options))
-			die(_("fsck error in pack objects"));
-	}
+	if (strict && fsck_finish(&fsck_options))
+		die(_("fsck error in pack objects"));
 	if (!hasheq(fill(the_hash_algo->rawsz), oid.hash))
 		die("final sha1 did not match");
 	use(the_hash_algo->rawsz);

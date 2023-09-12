@@ -25,6 +25,8 @@
 #include "midx.h"
 #include "commit-reach.h"
 #include "date.h"
+#include "object-file-convert.h"
+#include "pack-compat-map.h"
 
 static int get_oid_oneline(struct repository *r, const char *, struct object_id *, struct commit_list *);
 
@@ -32,6 +34,7 @@ typedef int (*disambiguate_hint_fn)(struct repository *, const struct object_id 
 
 struct disambiguate_state {
 	int len; /* length of prefix in hex chars */
+	int algo;
 	char hex_pfx[GIT_MAX_HEXSZ + 1];
 	struct object_id bin_pfx;
 
@@ -49,6 +52,10 @@ struct disambiguate_state {
 
 static void update_candidates(struct disambiguate_state *ds, const struct object_id *current)
 {
+	/* Is the oid encoded in the desired algo? */
+	if (ds->algo && (current->algo != ds->algo))
+		return;
+
 	if (ds->always_call_fn) {
 		ds->ambiguous = ds->fn(ds->repo, current, ds->cb_data) ? 1 : 0;
 		return;
@@ -134,6 +141,8 @@ static void unique_in_midx(struct multi_pack_index *m,
 {
 	uint32_t num, i, first = 0;
 	const struct object_id *current = NULL;
+	int len = ds->len > ds->repo->hash_algo->hexsz ?
+		ds->repo->hash_algo->hexsz : ds->len;
 	num = m->num_objects;
 
 	if (!num)
@@ -149,7 +158,7 @@ static void unique_in_midx(struct multi_pack_index *m,
 	for (i = first; i < num && !ds->ambiguous; i++) {
 		struct object_id oid;
 		current = nth_midxed_object_oid(&oid, m, i);
-		if (!match_hash(ds->len, ds->bin_pfx.hash, current->hash))
+		if (!match_hash(len, ds->bin_pfx.hash, current->hash))
 			break;
 		update_candidates(ds, current);
 	}
@@ -159,6 +168,8 @@ static void unique_in_pack(struct packed_git *p,
 			   struct disambiguate_state *ds)
 {
 	uint32_t num, i, first = 0;
+	int len = ds->len > ds->repo->hash_algo->hexsz ?
+		ds->repo->hash_algo->hexsz : ds->len;
 
 	if (p->multi_pack_index)
 		return;
@@ -177,7 +188,7 @@ static void unique_in_pack(struct packed_git *p,
 	for (i = first; i < num && !ds->ambiguous; i++) {
 		struct object_id oid;
 		nth_packed_object_id(&oid, p, i);
-		if (!match_hash(ds->len, ds->bin_pfx.hash, oid.hash))
+		if (!match_hash(len, ds->bin_pfx.hash, oid.hash))
 			break;
 		update_candidates(ds, &oid);
 	}
@@ -188,12 +199,29 @@ static void find_short_packed_object(struct disambiguate_state *ds)
 	struct multi_pack_index *m;
 	struct packed_git *p;
 
+	/* Skip, unless oids from the repository algorithm are wanted */
+	if (ds->algo && (&hash_algos[ds->algo] != ds->repo->hash_algo))
+		return;
+
 	for (m = get_multi_pack_index(ds->repo); m && !ds->ambiguous;
 	     m = m->next)
 		unique_in_midx(m, ds);
 	for (p = get_packed_git(ds->repo); p && !ds->ambiguous;
 	     p = p->next)
 		unique_in_pack(p, ds);
+}
+
+static void find_short_packed_compat_object(struct disambiguate_state *ds)
+{
+	struct packed_git *p;
+
+	/* Skip, unless compatibility oids are wanted */
+	if (!ds->algo && (&hash_algos[ds->algo] != ds->repo->compat_hash_algo))
+		return;
+
+	for (p = get_packed_git(ds->repo); p && !ds->ambiguous; p = p->next)
+		pack_compat_map_each(ds->repo, p, ds->bin_pfx.hash, ds->len,
+				     match_prefix, ds);
 }
 
 static int finish_object_disambiguation(struct disambiguate_state *ds,
@@ -330,7 +358,7 @@ static int init_object_disambiguation(struct repository *r,
 {
 	int i;
 
-	if (len < MINIMUM_ABBREV || len > the_hash_algo->hexsz)
+	if (len < MINIMUM_ABBREV || len > GIT_MAX_HEXSZ)
 		return -1;
 
 	memset(ds, 0, sizeof(*ds));
@@ -357,6 +385,7 @@ static int init_object_disambiguation(struct repository *r,
 	ds->len = len;
 	ds->hex_pfx[len] = '\0';
 	ds->repo = r;
+	ds->algo = GIT_HASH_UNKNOWN;
 	prepare_alt_odb(r);
 	return 0;
 }
@@ -491,9 +520,10 @@ static int repo_collect_ambiguous(struct repository *r UNUSED,
 	return collect_ambiguous(oid, data);
 }
 
-static int sort_ambiguous(const void *a, const void *b, void *ctx)
+static int sort_ambiguous(const void *va, const void *vb, void *ctx)
 {
 	struct repository *sort_ambiguous_repo = ctx;
+	const struct object_id *a = va, *b = vb;
 	int a_type = oid_object_info(sort_ambiguous_repo, a, NULL);
 	int b_type = oid_object_info(sort_ambiguous_repo, b, NULL);
 	int a_type_sort;
@@ -503,8 +533,13 @@ static int sort_ambiguous(const void *a, const void *b, void *ctx)
 	 * Sorts by hash within the same object type, just as
 	 * oid_array_for_each_unique() would do.
 	 */
-	if (a_type == b_type)
-		return oidcmp(a, b);
+	if (a_type == b_type) {
+		/* Is the hash algorithm the same? */
+		if (a->algo == b->algo)
+			return oidcmp(a, b);
+		else
+			return a->algo < b->algo ? -1 : 1;
+	}
 
 	/*
 	 * Between object types show tags, then commits, and finally
@@ -553,8 +588,14 @@ static enum get_oid_result get_short_oid(struct repository *r,
 	else
 		ds.fn = default_disambiguate_hint;
 
+	if (flags & GET_OID_SHA1)
+		ds.algo = GIT_HASH_SHA1;
+	else if (flags & GET_OID_SHA256)
+		ds.algo = GIT_HASH_SHA256;
+
 	find_short_object_filename(&ds);
 	find_short_packed_object(&ds);
+	find_short_packed_compat_object(&ds);
 	status = finish_object_disambiguation(&ds, oid);
 
 	/*
@@ -566,6 +607,7 @@ static enum get_oid_result get_short_oid(struct repository *r,
 		reprepare_packed_git(r);
 		find_short_object_filename(&ds);
 		find_short_packed_object(&ds);
+		find_short_packed_compat_object(&ds);
 		status = finish_object_disambiguation(&ds, oid);
 	}
 
@@ -606,6 +648,15 @@ static enum get_oid_result get_short_oid(struct repository *r,
 		strbuf_release(&out.sb);
 	}
 
+	/* Ensure oid->algo is set */
+	if (oid->algo == GIT_HASH_UNKNOWN)
+		oid->algo = hash_algo_by_ptr(r->hash_algo);
+
+	/* Return oids using the repository's hash algorithm */
+	if ((&hash_algos[oid->algo] != r->hash_algo) &&
+	    !(flags & GET_OID_UNTRANSLATED))
+		repo_oid_to_algop(r, oid, r->hash_algo, oid);
+
 	return status;
 }
 
@@ -624,6 +675,7 @@ int repo_for_each_abbrev(struct repository *r, const char *prefix,
 	ds.cb_data = &collect;
 	find_short_object_filename(&ds);
 	find_short_packed_object(&ds);
+	find_short_packed_compat_object(&ds);
 
 	ret = oid_array_for_each_unique(&collect, fn, cb_data);
 	oid_array_clear(&collect);
@@ -787,10 +839,12 @@ void strbuf_add_unique_abbrev(struct strbuf *sb, const struct object_id *oid,
 int repo_find_unique_abbrev_r(struct repository *r, char *hex,
 			      const struct object_id *oid, int len)
 {
+	const struct git_hash_algo *algo =
+		oid->algo ? &hash_algos[oid->algo] : r->hash_algo;
 	struct disambiguate_state ds;
 	struct min_abbrev_data mad;
 	struct object_id oid_ret;
-	const unsigned hexsz = r->hash_algo->hexsz;
+	const unsigned hexsz = algo->hexsz;
 
 	if (len < 0) {
 		unsigned long count = repo_approximate_object_count(r);
@@ -834,6 +888,7 @@ int repo_find_unique_abbrev_r(struct repository *r, char *hex,
 	ds.cb_data = (void *)&mad;
 
 	find_short_object_filename(&ds);
+	find_short_packed_compat_object(&ds);
 	(void)finish_object_disambiguation(&ds, &oid_ret);
 
 	hex[mad.cur_len] = 0;
@@ -1158,6 +1213,14 @@ static int peel_onion(struct repository *r, const char *name, int len,
 		return -1;
 
 	sp++; /* beginning of type name, or closing brace for empty */
+
+	if (starts_with(sp, "sha1}"))
+		return get_short_oid(r, name, len - 7, oid,
+				     lookup_flags | GET_OID_SHA1);
+	else if (starts_with(sp, "sha256"))
+		return get_short_oid(r, name, len - 9, oid,
+				     lookup_flags | GET_OID_SHA256);
+
 	if (starts_with(sp, "commit}"))
 		expected_type = OBJ_COMMIT;
 	else if (starts_with(sp, "tag}"))

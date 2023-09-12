@@ -42,6 +42,7 @@
 #include "promisor-remote.h"
 #include "pack-mtimes.h"
 #include "parse-options.h"
+#include "object-file-convert.h"
 
 /*
  * Objects we are going to pack are collected in the `to_pack` structure.
@@ -1547,10 +1548,16 @@ static struct object_entry *create_object_entry(const struct object_id *oid,
 						struct packed_git *found_pack,
 						off_t found_offset)
 {
+	struct repository *repo = the_repository;
+	const struct git_hash_algo *compat = repo->compat_hash_algo;
 	struct object_entry *entry;
 
 	entry = packlist_alloc(&to_pack, oid);
 	entry->hash = hash;
+	if (compat &&
+	    repo_oid_to_algop(repo, &entry->idx.oid, compat,
+			      &entry->idx.compat_oid))
+		die(_("can't map object %s while writing pack"), oid_to_hex(oid));
 	oe_set_type(entry, type);
 	if (exclude)
 		entry->preferred_base = 1;
@@ -1756,7 +1763,8 @@ static void add_pbase_object(struct tree_desc *tree,
 			tree = pbase_tree_get(&entry.oid);
 			if (!tree)
 				return;
-			init_tree_desc(&sub, tree->tree_data, tree->tree_size);
+			init_tree_desc(&sub, &tree->oid,
+				       tree->tree_data, tree->tree_size);
 
 			add_pbase_object(&sub, down, downlen, fullname);
 			pbase_tree_put(tree);
@@ -1816,7 +1824,8 @@ static void add_preferred_base_object(const char *name)
 		}
 		else {
 			struct tree_desc tree;
-			init_tree_desc(&tree, it->pcache.tree_data, it->pcache.tree_size);
+			init_tree_desc(&tree, &it->pcache.oid,
+				       it->pcache.tree_data, it->pcache.tree_size);
 			add_pbase_object(&tree, name, cmplen, name);
 		}
 	}

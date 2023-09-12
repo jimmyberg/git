@@ -75,6 +75,7 @@ struct pack_idx_header {
  */
 struct pack_idx_entry {
 	struct object_id oid;
+	struct object_id compat_oid;
 	uint32_t crc32;
 	off_t offset;
 };

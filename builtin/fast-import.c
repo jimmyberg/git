@@ -26,6 +26,8 @@
 #include "commit-reach.h"
 #include "khash.h"
 #include "date.h"
+#include "object-file-convert.h"
+#include "pack-compat-map.h"
 
 #define PACK_ID_BITS 16
 #define MAX_PACK_ID ((1<<PACK_ID_BITS)-1)
@@ -775,9 +777,14 @@ static void start_packfile(void)
 	all_packs[pack_id] = p;
 }
 
-static const char *create_index(void)
+struct pack_index_names {
+	const char *index_name;
+	const char *compat_name;
+};
+
+static struct pack_index_names create_index(void)
 {
-	const char *tmpfile;
+	struct pack_index_names tmp = { 0 };
 	struct pack_idx_entry **idx, **c, **last;
 	struct object_entry *e;
 	struct object_entry_pool *o;
@@ -793,13 +800,15 @@ static const char *create_index(void)
 	if (c != last)
 		die("internal consistency error creating the index");
 
-	tmpfile = write_idx_file(NULL, idx, object_count, &pack_idx_opts,
-				 pack_data->hash);
+	tmp.index_name = write_idx_file(NULL, idx, object_count, &pack_idx_opts,
+					pack_data->hash);
+	tmp.compat_name = write_compat_map_file(NULL, idx, object_count,
+						pack_data->hash);
 	free(idx);
-	return tmpfile;
+	return tmp;
 }
 
-static char *keep_pack(const char *curr_index_name)
+static char *keep_pack(struct pack_index_names curr)
 {
 	static const char *keep_msg = "fast-import";
 	struct strbuf name = STRBUF_INIT;
@@ -818,9 +827,17 @@ static char *keep_pack(const char *curr_index_name)
 		die("cannot store pack file");
 
 	odb_pack_name(&name, pack_data->hash, "idx");
-	if (finalize_object_file(curr_index_name, name.buf))
+	if (finalize_object_file(curr.index_name, name.buf))
 		die("cannot store index file");
-	free((void *)curr_index_name);
+
+	if (curr.compat_name) {
+		odb_pack_name(&name, pack_data->hash, "compat");
+		if (finalize_object_file(curr.compat_name, name.buf))
+			die("cannot store compatibility map file");
+	}
+
+	free((void *)curr.index_name);
+	free((void *)curr.compat_name);
 	return strbuf_detach(&name, NULL);
 }
 
@@ -943,6 +960,8 @@ static int store_object(
 	struct object_id *oidout,
 	uintmax_t mark)
 {
+	struct repository *repo = the_repository;
+	const struct git_hash_algo *compat = repo->compat_hash_algo;
 	void *out, *delta;
 	struct object_entry *e;
 	unsigned char hdr[96];
@@ -966,8 +985,7 @@ static int store_object(
 	if (e->idx.offset) {
 		duplicate_count_by_type[type]++;
 		return 1;
-	} else if (find_sha1_pack(oid.hash,
-				  get_all_packs(the_repository))) {
+	} else if (find_sha1_pack(oid.hash, get_all_packs(repo))) {
 		e->type = type;
 		e->pack_id = MAX_PACK_ID;
 		e->idx.offset = 1; /* just not zero! */
@@ -1026,6 +1044,45 @@ static int store_object(
 	e->type = type;
 	e->pack_id = pack_id;
 	e->idx.offset = pack_size;
+	if (compat && (type == OBJ_BLOB)) {
+		compat->init_fn(&c);
+		compat->update_fn(&c, hdr, hdrlen);
+		compat->update_fn(&c, dat->buf, dat->len);
+		compat->final_oid_fn(&e->idx.compat_oid, &c);
+	} else if (compat) {
+		struct object_file_convert_state state;
+		struct strbuf out = STRBUF_INIT;
+		int ret;
+
+		convert_object_file_begin(&state, &out, the_hash_algo, compat,
+					  dat->buf, dat->len, type);
+		for (;;) {
+			struct object_entry *pobj;
+
+			convert_object_file_step(&state);
+			if (ret != 1)
+				break;
+
+			ret = -1;
+			pobj = find_object(&state.oid);
+			if (pobj && pobj->idx.compat_oid.algo)
+				oidcpy(&state.mapped_oid, &pobj->idx.compat_oid);
+			else if (pobj)
+				break;
+			else if (repo_oid_to_algop(repo, &state.oid, compat,
+						   &state.mapped_oid) &&
+				 repo_submodule_oid_to_algop(repo, &state.oid,
+							     compat,
+							     &state.mapped_oid))
+				break;
+		}
+		convert_object_file_end(&state, ret);
+		if (ret)
+			die(_("No mapping for %s to %s\n"),
+			    oid_to_hex(&state.oid), compat->name);
+		hash_object_file(compat, out.buf, out.len, type, &e->idx.compat_oid);
+		strbuf_release(&out);
+	}
 	object_count++;
 	object_count_by_type[type]++;
 
@@ -1084,14 +1141,15 @@ static void truncate_pack(struct hashfile_checkpoint *checkpoint)
 
 static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 {
+	const struct git_hash_algo *compat = the_repository->compat_hash_algo;
 	size_t in_sz = 64 * 1024, out_sz = 64 * 1024;
 	unsigned char *in_buf = xmalloc(in_sz);
 	unsigned char *out_buf = xmalloc(out_sz);
 	struct object_entry *e;
-	struct object_id oid;
+	struct object_id oid, compat_oid;
 	unsigned long hdrlen;
 	off_t offset;
-	git_hash_ctx c;
+	git_hash_ctx c, compat_c;
 	git_zstream s;
 	struct hashfile_checkpoint checkpoint;
 	int status = Z_OK;
@@ -1110,6 +1168,10 @@ static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 
 	the_hash_algo->init_fn(&c);
 	the_hash_algo->update_fn(&c, out_buf, hdrlen);
+	if (compat) {
+		compat->init_fn(&compat_c);
+		compat->update_fn(&compat_c, out_buf, hdrlen);
+	}
 
 	crc32_begin(pack_file);
 
@@ -1128,6 +1190,8 @@ static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 				die("EOF in data (%" PRIuMAX " bytes remaining)", len);
 
 			the_hash_algo->update_fn(&c, in_buf, n);
+			if (compat)
+				compat->update_fn(&compat_c, in_buf, n);
 			s.next_in = in_buf;
 			s.avail_in = n;
 			len -= n;
@@ -1154,6 +1218,8 @@ static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 	}
 	git_deflate_end(&s);
 	the_hash_algo->final_oid_fn(&oid, &c);
+	if (compat)
+		compat->final_oid_fn(&compat_oid, &compat_c);
 
 	if (oidout)
 		oidcpy(oidout, &oid);
@@ -1181,6 +1247,8 @@ static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 		e->pack_id = pack_id;
 		e->idx.offset = offset;
 		e->idx.crc32 = crc32_end(pack_file);
+		if (compat)
+			oidcpy(&e->idx.compat_oid, &compat_oid);
 		object_count++;
 		object_count_by_type[OBJ_BLOB]++;
 	}
@@ -1236,20 +1304,6 @@ static void *gfi_unpack_entry(
 	return unpack_entry(the_repository, p, oe->idx.offset, &type, sizep);
 }
 
-static const char *get_mode(const char *str, uint16_t *modep)
-{
-	unsigned char c;
-	uint16_t mode = 0;
-
-	while ((c = *str++) != ' ') {
-		if (c < '0' || c > '7')
-			return NULL;
-		mode = (mode << 3) + (c - '0');
-	}
-	*modep = mode;
-	return str;
-}
-
 static void load_tree(struct tree_entry *root)
 {
 	struct object_id *oid = &root->versions[1].oid;
@@ -1287,7 +1341,7 @@ static void load_tree(struct tree_entry *root)
 		t->entries[t->entry_count++] = e;
 
 		e->tree = NULL;
-		c = get_mode(c, &e->versions[1].mode);
+		c = parse_mode(c, &e->versions[1].mode);
 		if (!c)
 			die("Corrupt mode in %s", oid_to_hex(oid));
 		e->versions[0].mode = e->versions[1].mode;
@@ -2276,7 +2330,7 @@ static void file_change_m(const char *p, struct branch *b)
 	struct object_id oid;
 	uint16_t mode, inline_data = 0;
 
-	p = get_mode(p, &mode);
+	p = parse_mode(p, &mode);
 	if (!p)
 		die("Corrupt mode: %s", command_buf.buf);
 	switch (mode) {

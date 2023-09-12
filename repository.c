@@ -14,6 +14,7 @@
 #include "read-cache-ll.h"
 #include "remote.h"
 #include "setup.h"
+#include "loose.h"
 #include "submodule-config.h"
 #include "sparse-index.h"
 #include "trace2.h"
@@ -104,6 +105,18 @@ void repo_set_hash_algo(struct repository *repo, int hash_algo)
 	repo->hash_algo = &hash_algos[hash_algo];
 }
 
+void repo_enable_compat_map(struct repository *repo, int enable_compat)
+{
+	const struct git_hash_algo *other_algo =
+		&hash_algos[(hash_algo_by_ptr(repo->hash_algo) == GIT_HASH_SHA1) ?
+			GIT_HASH_SHA256 :
+			GIT_HASH_SHA1];
+
+	repo->compat_hash_algo = enable_compat ? other_algo : NULL;
+	if (enable_compat)
+		repo_read_loose_object_map(repo);
+}
+
 /*
  * Attempt to resolve and set the provided 'gitdir' for repository 'repo'.
  * Return 0 upon success and a non-zero value upon failure.
@@ -184,6 +197,7 @@ int repo_init(struct repository *repo,
 		goto error;
 
 	repo_set_hash_algo(repo, format.hash_algo);
+	repo_enable_compat_map(repo, format.use_compat_map);
 	repo->repository_format_worktree_config = format.worktree_config;
 
 	/* take ownership of format.partial_clone */
@@ -192,6 +206,9 @@ int repo_init(struct repository *repo,
 
 	if (worktree)
 		repo_set_worktree(repo, worktree);
+
+	if (repo->compat_hash_algo)
+		repo_read_loose_object_map(repo);
 
 	clear_repository_format(&format);
 	return 0;
